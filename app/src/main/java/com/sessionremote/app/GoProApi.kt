@@ -60,6 +60,9 @@ class GoProApi {
         }
     }
 
+    /** Large read-only GETs (the capability schema can be big). */
+    suspend fun rawBulk(path: String): String = get(path, bulkClient)
+
     /** Any GET path, returns the body. Used for diagnostics. */
     suspend fun raw(path: String): String = get(path)
 

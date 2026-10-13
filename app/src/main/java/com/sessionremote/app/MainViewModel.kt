@@ -286,6 +286,36 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         exitScope.launch { runCatching { restoreStealth() } }
     }
 
+    /** Dumps /gp/gpControl (the camera's full settings/commands schema) + info + status to Downloads. */
+    fun exportCapabilities() = act("Export") {
+        val parts = linkedMapOf(
+            "schema" to "/gp/gpControl",
+            "info" to "/gp/gpControl/info",
+            "status" to "/gp/gpControl/status",
+        )
+        val sb = StringBuilder("{\n")
+        parts.entries.forEachIndexed { i, (name, path) ->
+            val body = runCatching { api.rawBulk(path) }.getOrElse { "\"ERROR: ${describe(it)}\"" }.ifBlank { "\"(empty)\"" }
+            sb.append("\"").append(name).append("\": ").append(body)
+            sb.append(if (i < parts.size - 1) ",\n" else "\n")
+        }
+        sb.append("}\n")
+        val name = "gopro-capabilities-${System.currentTimeMillis() / 1000}.json"
+        withContext(Dispatchers.IO) {
+            val resolver = getApplication<Application>().contentResolver
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                put(MediaStore.MediaColumns.MIME_TYPE, "application/json")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+            }
+            val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                ?: throw IOException("Couldn't create the file in Downloads")
+            resolver.openOutputStream(uri)?.use { it.write(sb.toString().toByteArray()) }
+                ?: throw IOException("Couldn't write the file")
+        }
+        say("Saved $name to Downloads (${sb.length / 1024} KB). Attach it in the chat.")
+    }
+
     fun setLocate(on: Boolean) = act("Locate") {
         api.raw("/gp/gpControl/command/system/locate?p=${if (on) 1 else 0}")
         _ui.update { it.copy(locating = on) }

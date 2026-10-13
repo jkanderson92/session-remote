@@ -678,6 +678,16 @@ fun SettingsTab(ui: UiState, vm: MainViewModel) {
         if (connected && inVideo && !protuneOn) {
             Text("Turn Protune on to adjust the rest.", color = TextDim, fontSize = 13.sp)
         }
+        SectionTitle("Advanced")
+        Card {
+            Label("Camera capabilities")
+            Text(
+                "Saves the camera's own list of every setting and command it supports to Downloads. Read-only; changes nothing on the camera.",
+                color = TextDim, fontSize = 13.sp
+            )
+            Spacer(Modifier.height(8.dp))
+            Button(onClick = { vm.exportCapabilities() }, enabled = connected && !ui.working) { Text("Export to Downloads") }
+        }
         Spacer(Modifier.height(24.dp))
     }
 }
