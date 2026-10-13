@@ -314,7 +314,7 @@ fun LivePlayer(software: Boolean, vm: MainViewModel, modifier: Modifier = Modifi
         key(software) {
             VlcPlayer(
                 uri = "udp://@:${StreamProbe.PORT}",
-                options = listOf(":network-caching=300", ":clock-jitter=0", ":clock-synchro=0", ":no-audio") +
+                options = listOf(":network-caching=300", ":clock-jitter=0", ":clock-synchro=0", ":no-audio", ":demux=ts") +
                     (if (software) listOf(":codec=avcodec") else emptyList()),
                 modifier = Modifier.fillMaxSize(),
                 onState = { st ->
