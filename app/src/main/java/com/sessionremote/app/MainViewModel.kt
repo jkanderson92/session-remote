@@ -66,6 +66,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val _media = MutableStateFlow(MediaUi())
     val media: StateFlow<MediaUi> = _media.asStateFlow()
 
+    private val _schema = MutableStateFlow<CameraSchema?>(null)
+    val schema: StateFlow<CameraSchema?> = _schema.asStateFlow()
+
     private val _preview = MutableStateFlow<Preview>(Preview.Off)
     val preview: StateFlow<Preview> = _preview.asStateFlow()
 
@@ -110,6 +113,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         }
                         // Ends the camera's "searching" countdown; harmless if this firmware ignores it.
                         runCatching { api.pairComplete() }
+                        // The Session stays in pairing state (status 28) until its mode changes.
+                        // Re-sending the current mode clears it, same as tapping a mode by hand.
+                        if (s.pairing && !s.busy && s.mode != null) {
+                            delay(300)
+                            runCatching { api.setMode(s.mode) }
+                        }
+                        if (_schema.value == null) {
+                            runCatching { CameraSchema.parse(org.json.JSONObject(api.rawBulk("/gp/gpControl"))) }
+                                .onSuccess { sc -> _schema.value = sc }
+                        }
                         keepAlive.start(viewModelScope)
                     }
                     if (_ui.value.modelName == null) loadInfo()
@@ -222,22 +235,25 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun setResolution(res: Int) = act("Resolution change") { changeResolution(res) }
 
     /** One-tap preset: video mode, resolution, then exact FPS and FOV. */
-    fun applyPreset(res: Int, fps: Int, fov: Int) = act("Preset") {
+    /** One-tap preset: video mode, resolution, and the allowed frame rate closest to [fps] (NTSC/PAL aware). */
+    fun applyPreset(res: Int, fps: Double) = act("Preset") {
         if (_ui.value.status?.mode != 0) { api.setMode(0); delay(400) }
-        changeResolution(res)
-        delay(250)
-        val now = runCatching { api.status().settings }.getOrDefault(emptyMap())
-        if (now[3] != fps) api.setSetting(3, fps)
-        if (now[4] != fov) runCatching { api.setSetting(4, fov) }
+        changeResolution(res, fps)
     }
 
-    private val stealthNames = mapOf(72 to "Status screen", 58 to "On-screen info", 49 to "Brightness", 51 to "Screen sleep", 55 to "Red LED", 56 to "Beeps")
-    private val stealthOn = listOf(72 to 0, 58 to 0, 49 to 2, 51 to 1, 55 to 0, 56 to 2)
-    private val stealthDefaults = mapOf(72 to 1, 58 to 1, 49 to 0, 51 to 0, 55 to 2, 56 to 0)
+    /** Marks a HiLight in the current recording. */
+    fun tagMoment() = act("HiLight") {
+        api.raw("/gp/gpControl/command/storage/tag_moment")
+        say("HiLight tagged.")
+    }
+
+    // The Session's schema has no display setting, so its status screen can't be dimmed. LED + beeps only.
+    private val stealthNames = mapOf(55 to "Red LED", 56 to "Beeps")
+    private val stealthOn = listOf(55 to 0, 56 to 2)
+    private val stealthDefaults = mapOf(55 to 1, 56 to 0)
 
     private suspend fun applyStealth(targets: List<Pair<Int, Int>>): List<String> = targets.map { (id, v) ->
-        val ok = runCatching { api.setSetting(id, v) }.isSuccess ||
-            (id == 55 && v != 0 && runCatching { api.setSetting(55, 1) }.isSuccess)
+        val ok = runCatching { api.setSetting(id, v) }.isSuccess
         "${stealthNames[id]}: ${if (ok) "✓" else "not supported"}"
     }
 
@@ -321,23 +337,32 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _ui.update { it.copy(locating = on) }
     }
 
-    private suspend fun changeResolution(res: Int) {
+    private fun fpsNumber(value: Int?): Double? =
+        value?.let { v -> _schema.value?.settings?.get(3)?.options?.firstOrNull { it.value == v }?.name?.toDoubleOrNull() }
+
+    /** Sets resolution, then moves FPS/FOV to the closest values the camera allows at that resolution. */
+    private suspend fun changeResolution(res: Int, targetFps: Double? = null) {
         val st = runCatching { api.status().settings }.getOrNull() ?: _ui.value.status?.settings ?: emptyMap()
-        val fps = SessionModes.bestFps(res, st[3])
-        val fov = SessionModes.bestFov(res, st[4])
+        val sc = _schema.value
+        val hypo = st + (2 to res)
+        val wantFps = targetFps ?: fpsNumber(st[3])
+        val fps = if (sc != null) sc.closestAllowed(hypo, 3, wantFps) else SessionModes.bestFps(res, st[3])
+        val fov = if (sc != null) {
+            if (st[4] != null && sc.allowed(hypo, 4, st[4]!!)) st[4] else sc.closestAllowed(hypo, 4, null)
+        } else SessionModes.bestFov(res, st[4])
         try {
             api.setSetting(2, res)
         } catch (e: CameraHttpException) {
-            // Camera refused because the current FPS doesn't fit the new resolution: fix FPS, retry.
+            // Refused because the current FPS doesn't fit the new resolution: fix FPS first, then retry.
             if (fps == null || fps == st[3]) throw e
             api.setSetting(3, fps)
             delay(250)
             api.setSetting(2, res)
         }
         delay(250)
-        val now = runCatching { api.status().settings }.getOrDefault(st)
-        if (fps != null && now[3] != fps && !SessionModes.fpsAllowed(res, now[3] ?: -1)) api.setSetting(3, fps)
-        if (fov != null && now[4] != fov && !SessionModes.fovAllowed(res, now[4] ?: -1)) api.setSetting(4, fov)
+        val now = runCatching { api.status().settings }.getOrDefault(hypo)
+        if (fps != null && now[3] != fps) runCatching { api.setSetting(3, fps) }
+        if (fov != null && now[4] != fov) runCatching { api.setSetting(4, fov) }
     }
 
     /** Red LED (setting 55). HERO4 firmware differs on the "on" value, so fall back from 2 to 1. */
@@ -345,7 +370,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (!on) {
             api.setSetting(55, 0)
         } else {
-            try { api.setSetting(55, 2) } catch (e: CameraHttpException) { api.setSetting(55, 1) }
+            api.setSetting(55, 1)
         }
     }
 

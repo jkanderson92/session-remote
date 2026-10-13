@@ -195,6 +195,8 @@ data class CameraStatus(
     val remainingSpaceKb: Long?,
     val clients: Int?,
     val streaming: Boolean,
+    /** Status 28: camera is still in its Wi-Fi "pairing/searching" state. */
+    val pairing: Boolean,
     val settings: Map<Int, Int>,
 ) {
     val recording get() = busy && mode == 0
@@ -230,6 +232,7 @@ data class CameraStatus(
                 remainingSpaceKb = l(54),
                 clients = i(31),
                 streaming = i(32) == 1,
+                pairing = i(28) == 1,
                 settings = settings,
             )
         }

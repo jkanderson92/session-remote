@@ -196,13 +196,14 @@ fun MessageBar(text: String, onDismiss: () -> Unit) {
 
 // ---------- Control ----------
 
-data class Preset(val name: String, val detail: String, val res: Int, val fps: Int, val fov: Int)
+/** fps = target; the app picks the closest rate the camera allows (60 becomes 50 in PAL, etc). */
+data class Preset(val name: String, val detail: String, val res: Int, val fps: Double)
 
 val PRESETS = listOf(
-    Preset("Max detail", "1440p · 30", 7, 8, 0),
-    Preset("Action", "1080p · 60", 9, 5, 0),
-    Preset("Wide action", "1080p SV · 48", 8, 7, 0),
-    Preset("Slow-mo", "WVGA · 120", 13, 1, 0),
+    Preset("Max detail", "1440p", 7, 30.0),
+    Preset("Action", "1080p · fastest", 9, 60.0),
+    Preset("Wide action", "1080p SuperView", 8, 48.0),
+    Preset("Slow-mo", "WVGA · fastest", 13, 120.0),
 )
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -253,14 +254,14 @@ fun ControlTab(ui: UiState, preview: Preview, vm: MainViewModel) {
             val st = s?.settings
             FlowRow {
                 PRESETS.forEach { p ->
-                    val active = s?.mode == 0 && st?.get(2) == p.res && st[3] == p.fps
+                    val active = s?.mode == 0 && st?.get(2) == p.res
                     Column(
                         Modifier
                             .padding(3.dp)
                             .alpha(if (connected && !ui.working || active) 1f else 0.4f)
                             .clip(RoundedCornerShape(12.dp))
                             .background(if (active) Accent else Surface2)
-                            .clickable(enabled = connected && !ui.working && !active && s?.recording != true) { vm.applyPreset(p.res, p.fps, p.fov) }
+                            .clickable(enabled = connected && !ui.working && !active && s?.recording != true) { vm.applyPreset(p.res, p.fps) }
                             .padding(horizontal = 14.dp, vertical = 10.dp)
                     ) {
                         Text(p.name, color = if (active) Color.Black else TextMain, fontSize = 15.sp, fontWeight = FontWeight.Bold)
@@ -297,10 +298,10 @@ fun ControlTab(ui: UiState, preview: Preview, vm: MainViewModel) {
                     onClick = { vm.setStealth(true) },
                     enabled = connected && !ui.working,
                     modifier = Modifier.fillMaxWidth()
-                ) { Text("🌙 Stealth: screen, LED & beeps off") }
+                ) { Text("🌙 Stealth: LED & beeps off") }
             }
             Text(
-                "Stealth turns itself off when you close the app, turn the camera off here, or reconnect after a dropped connection.",
+                "The Session has no setting for its status screen, so it stays lit; tape over it if needed. Stealth turns itself off when you close the app, turn the camera off here, or reconnect after a dropped connection.",
                 color = TextDim, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp)
             )
             Spacer(Modifier.height(8.dp))
@@ -513,7 +514,9 @@ fun ShutterArea(ui: UiState, vm: MainViewModel, connected: Boolean) {
                 "● REC  ${fmtDuration(s?.recordSeconds ?: 0)}",
                 color = Rec, fontSize = 22.sp, fontWeight = FontWeight.Bold,
                 modifier = Modifier.padding(top = 4.dp)
-            )
+            )            OutlinedButton(onClick = { vm.tagMoment() }, enabled = enabled, modifier = Modifier.padding(top = 6.dp)) {
+                Text("★ Tag HiLight")
+            }
         }
         if (mode == 1 || mode == 2) {
             Spacer(Modifier.height(8.dp))
@@ -595,10 +598,6 @@ private val VIDEO_SETTINGS = listOf(
     SettingDef(4, "Field of view", listOf(Opt("Ultra Wide", 0), Opt("Medium", 1))),
 )
 
-private val AUTO_OFF = SettingDef(59, "Auto off", listOf(
-    Opt("Never", 0), Opt("1 min", 1), Opt("2 min", 2), Opt("3 min", 3), Opt("5 min", 4),
-))
-
 // Session-specific Protune values (firmware 2.00+, video mode only) per goprowifihack HERO4-Session doc.
 private val PROTUNE_SETTINGS = listOf(
     SettingDef(10, "Protune", listOf(Opt("Off", 0), Opt("On", 1))),
@@ -618,8 +617,22 @@ private val PROTUNE_SETTINGS = listOf(
 @Composable
 fun SettingsTab(ui: UiState, vm: MainViewModel) {
     val s = ui.status
+    val sc by vm.schema.collectAsState()
     val connected = ui.conn == Conn.CONNECTED && s != null
     val enabled = connected && !ui.working && s?.recording != true
+    val cur = s?.settings ?: emptyMap()
+    // The camera's own rules decide what's crossed out; hand table only until the schema loads.
+    fun ok(id: Int, v: Int): Boolean = sc?.allowed(cur, id, v) ?: when (id) {
+        3 -> SessionModes.fpsAllowed(cur[2], v)
+        4 -> SessionModes.fovAllowed(cur[2], v)
+        else -> true
+    }
+    @Composable
+    fun schemaRow(id: Int, title: String? = null, note: String? = null, rowEnabled: Boolean = enabled) {
+        sc?.asDef(id, title)?.let { def ->
+            SettingRow(def, s, rowEnabled, vm, note = note, allowed = { ok(id, it) })
+        }
+    }
     Column(
         Modifier
             .fillMaxSize()
@@ -630,39 +643,28 @@ fun SettingsTab(ui: UiState, vm: MainViewModel) {
         if (!connected) Text("Connect to the camera to change settings.", color = TextDim)
         if (s?.recording == true) Text("Stop recording to change settings.", color = Warn)
         Text(
-            "Options that don't work with your current resolution are crossed out.",
+            "Crossed out = the camera doesn't allow it with your other settings (its own rules).",
             color = TextDim, fontSize = 13.sp
         )
+
         SectionTitle("Video")
-        val res = s?.settings?.get(2)
+        val res = cur[2]
         SettingRow(
             VIDEO_SETTINGS[0], s, enabled, vm,
-            note = "FPS and FOV adjust automatically if the new resolution needs it.",
+            note = "FPS and FOV adjust automatically when you change resolution.",
+            allowed = { ok(2, it) },
             onPick = { vm.setResolution(it) },
         )
-        SettingRow(
-            VIDEO_SETTINGS[1], s, enabled, vm,
-            note = "Crossed out = not available at this resolution.",
-            allowed = { SessionModes.fpsAllowed(res, it) },
-        )
+        SettingRow(VIDEO_SETTINGS[1], s, enabled, vm, allowed = { ok(3, it) })
         SettingRow(
             VIDEO_SETTINGS[2], s, enabled, vm,
             note = if (res == 8 || res == 11) "SuperView resolutions use their own fixed field of view." else null,
-            allowed = { SessionModes.fovAllowed(res, it) },
+            allowed = { ok(4, it) },
         )
-
-        SectionTitle("Camera")
-        SettingRow(AUTO_OFF, s, connected && !ui.working, vm)
-        Card {
-            Label("Red recording LED")
-            val ledOn = s?.settings?.get(55)?.let { it != 0 }
-            Row {
-                Chip("Off", ledOn == false, connected && !ui.working, Modifier.weight(1f)) { vm.setLed(false) }
-                Chip("On", ledOn == true, connected && !ui.working, Modifier.weight(1f)) { vm.setLed(true) }
-            }
-            if (connected && ledOn == null) Text("Camera doesn't report LED state; buttons still send the command.", color = TextDim, fontSize = 12.sp)
-        }
-        Text("Auto off controls the camera's sleep timer. If an option is rejected, your firmware doesn't support it.", color = TextDim, fontSize = 13.sp)
+        schemaRow(57, "Video format", note = "NTSC = 30/60 fps family (US). PAL = 25/50 (Europe, avoids flicker under 50 Hz lights).")
+        schemaRow(8, "Low light")
+        schemaRow(9, "Spot meter")
+        if (s?.mode == 0 && s.subMode == 3) schemaRow(6, "Looping interval")
 
         SectionTitle("Protune")
         val inVideo = s?.mode == 0
@@ -670,14 +672,49 @@ fun SettingsTab(ui: UiState, vm: MainViewModel) {
             Text("Protune only works in Video mode.", color = Warn, fontSize = 13.sp)
             Button(onClick = { vm.setMode(0) }, enabled = enabled) { Text("Switch to Video mode") }
         }
-        val protuneOn = s?.settings?.get(10) == 1
+        val protuneOn = cur[10] == 1
         PROTUNE_SETTINGS.forEach { def ->
             val rowEnabled = enabled && inVideo && (def.id == 10 || protuneOn)
-            SettingRow(def, s, rowEnabled, vm)
+            SettingRow(def, s, rowEnabled, vm, allowed = { ok(def.id, it) })
         }
         if (connected && inVideo && !protuneOn) {
-            Text("Turn Protune on to adjust the rest.", color = TextDim, fontSize = 13.sp)
+            Text("Turn Protune on to adjust the rest. Protune limits resolution to 1440, 1080, 960 and 720.", color = TextDim, fontSize = 13.sp)
         }
+
+        if (sc != null) {
+            SectionTitle("Photo")
+            schemaRow(17, "Megapixels")
+            schemaRow(20, "Spot meter")
+
+            SectionTitle("Multi-shot")
+            schemaRow(29, "Burst rate")
+            schemaRow(30, "Time-lapse interval")
+            schemaRow(28, "Megapixels")
+            schemaRow(33, "Spot meter")
+        }
+
+        SectionTitle("Camera")
+        Card {
+            Label("Red recording LED")
+            val ledOn = cur[55]?.let { it != 0 }
+            Row {
+                Chip("Off", ledOn == false, connected && !ui.working, Modifier.weight(1f)) { vm.setLed(false) }
+                Chip("On", ledOn == true, connected && !ui.working, Modifier.weight(1f)) { vm.setLed(true) }
+            }
+        }
+        schemaRow(56, "Beeps", rowEnabled = connected && !ui.working)
+        schemaRow(52, "Orientation", note = "Auto flips the video if the camera is mounted upside down.", rowEnabled = connected && !ui.working)
+        schemaRow(53, "Mode at power-on", rowEnabled = connected && !ui.working)
+
+        if (sc != null) {
+            SectionTitle("Live preview quality")
+            Text("Applies the next time you start the preview. Higher = sharper but may stutter at range.", color = TextDim, fontSize = 13.sp)
+            schemaRow(64, "Preview resolution", rowEnabled = connected && !ui.working)
+            schemaRow(62, "Preview bitrate", rowEnabled = connected && !ui.working)
+        } else if (connected) {
+            Text("Loading the camera's full settings list…", color = TextDim, fontSize = 13.sp)
+        }
+
         SectionTitle("Advanced")
         Card {
             Label("Camera capabilities")
