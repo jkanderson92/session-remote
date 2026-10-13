@@ -299,6 +299,10 @@ fun ControlTab(ui: UiState, preview: Preview, vm: MainViewModel) {
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("🌙 Stealth: screen, LED & beeps off") }
             }
+            Text(
+                "Stealth turns itself off when you close the app, turn the camera off here, or reconnect after a dropped connection.",
+                color = TextDim, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp)
+            )
             Spacer(Modifier.height(8.dp))
             if (ui.locating) {
                 Button(

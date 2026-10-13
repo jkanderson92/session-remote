@@ -75,6 +75,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         api.useNetwork(net)
         _ui.update { it.copy(conn = if (net == null) Conn.NO_WIFI else Conn.SEARCHING) }
     }
+    /** Outlives the ViewModel so a restore sent while closing still completes. */
+    private val exitScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
     private val keepAlive = KeepAlive()
     private var paired = false
     private var pollJob: Job? = null
@@ -101,6 +103,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     _ui.update { it.copy(conn = Conn.CONNECTED, status = s, detail = null) }
                     if (!paired) {
                         paired = true
+                        // Stealth can only be switched on while connected, so finding it still on at a
+                        // fresh connection means the link dropped or the app closed: undo it.
+                        restoreStealth()?.let {
+                            say("Stealth was on when the connection dropped, so the camera's screen and lights were restored.")
+                        }
                         // Ends the camera's "searching" countdown; harmless if this firmware ignores it.
                         runCatching { api.pairComplete() }
                         keepAlive.start(viewModelScope)
@@ -224,33 +231,59 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (now[4] != fov) runCatching { api.setSetting(4, fov) }
     }
 
+    private val stealthNames = mapOf(72 to "Status screen", 58 to "On-screen info", 49 to "Brightness", 51 to "Screen sleep", 55 to "Red LED", 56 to "Beeps")
+    private val stealthOn = listOf(72 to 0, 58 to 0, 49 to 2, 51 to 1, 55 to 0, 56 to 2)
+    private val stealthDefaults = mapOf(72 to 1, 58 to 1, 49 to 0, 51 to 0, 55 to 2, 56 to 0)
+
+    private suspend fun applyStealth(targets: List<Pair<Int, Int>>): List<String> = targets.map { (id, v) ->
+        val ok = runCatching { api.setSetting(id, v) }.isSuccess ||
+            (id == 55 && v != 0 && runCatching { api.setSetting(55, 1) }.isSuccess)
+        "${stealthNames[id]}: ${if (ok) "✓" else "not supported"}"
+    }
+
+    /** Values to go back to: what the camera had before Stealth, falling back to normal defaults. */
+    private fun restoreTargets(): List<Pair<Int, Int>> {
+        val saved = prefs.getString("stealth_restore", "").orEmpty().split(",").mapNotNull { kv ->
+            val parts = kv.split("=")
+            val k = parts.getOrNull(0)?.toIntOrNull()
+            val v = parts.getOrNull(1)?.toIntOrNull()
+            if (k != null && v != null) k to v else null
+        }.toMap()
+        return stealthDefaults.map { (id, def) -> id to (saved[id] ?: def) }
+    }
+
+    /** Turns the camera's screen/LED/beeps back on. Safe to call any time; no-op if Stealth is off. */
+    private suspend fun restoreStealth(): List<String>? {
+        if (!prefs.getBoolean("stealth", false)) return null
+        val report = applyStealth(restoreTargets())
+        prefs.edit().putBoolean("stealth", false).apply()
+        _ui.update { it.copy(stealth = false) }
+        return report
+    }
+
     /**
      * Stealth: darken the camera for concerts. Tries every documented HERO4 display/light/sound setting;
-     * the Session may support only some. Previous values are saved and restored on exit.
+     * the Session may support only some. Auto-reverts when the app reconnects after a dropped
+     * connection, when the app is closed, and before the camera is turned off from the app.
      */
     fun setStealth(on: Boolean) = act("Stealth") {
-        val st = runCatching { api.status().settings }.getOrDefault(emptyMap())
-        val ids = listOf(72, 58, 49, 51, 55, 56)
-        val names = mapOf(72 to "Status screen", 58 to "On-screen info", 49 to "Brightness", 51 to "Screen sleep", 55 to "Red LED", 56 to "Beeps")
-        val targets: List<Pair<Int, Int>>
         if (on) {
-            val snapshot = ids.filter { st.containsKey(it) }.joinToString(",") { "$it=${st[it]}" }
-            prefs.edit().putString("stealth_restore", snapshot).apply()
-            targets = listOf(72 to 0, 58 to 0, 49 to 2, 51 to 1, 55 to 0, 56 to 2)
+            val st = runCatching { api.status().settings }.getOrDefault(emptyMap())
+            val snapshot = stealthDefaults.keys.filter { st.containsKey(it) }.joinToString(",") { "$it=${st[it]}" }
+            prefs.edit().putString("stealth_restore", snapshot).putBoolean("stealth", true).apply()
+            _ui.update { it.copy(stealth = true) }
+            val report = applyStealth(stealthOn)
+            say("Stealth on. " + report.joinToString(" · ") + ". It turns itself off if the connection drops or the app closes.")
         } else {
-            val saved = prefs.getString("stealth_restore", "").orEmpty()
-                .split(",").mapNotNull { kv -> kv.split("=").takeIf { it.size == 2 }?.let { it[0].toIntOrNull()?.to(it[1].toIntOrNull()) } }
-                .mapNotNull { (k, v) -> if (k != null && v != null) k to v else null }
-            targets = saved.ifEmpty { listOf(72 to 1, 58 to 1, 49 to 0, 51 to 0, 55 to 2, 56 to 0) }
+            val report = restoreStealth() ?: applyStealth(restoreTargets())
+            say("Stealth off, camera restored. " + report.joinToString(" · "))
         }
-        val report = targets.map { (id, v) ->
-            val ok = runCatching { api.setSetting(id, v) }.isSuccess ||
-                (id == 55 && v != 0 && runCatching { api.setSetting(55, 1) }.isSuccess)
-            "${names[id]}: ${if (ok) "✓" else "not supported"}"
-        }
-        prefs.edit().putBoolean("stealth", on).apply()
-        _ui.update { it.copy(stealth = on) }
-        say((if (on) "Stealth on. " else "Stealth off, settings restored. ") + report.joinToString(" · "))
+    }
+
+    /** Called when the app is being closed: restore the camera on a scope that outlives the screen. */
+    fun restoreStealthOnExit() {
+        if (!prefs.getBoolean("stealth", false)) return
+        exitScope.launch { runCatching { restoreStealth() } }
     }
 
     fun setLocate(on: Boolean) = act("Locate") {
@@ -311,6 +344,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun sleepCamera() = act("Turn off") {
         stopPreview()
+        restoreStealth()
         api.sleep()
         say("Camera turned off. Tap Wake camera to turn it back on.")
     }

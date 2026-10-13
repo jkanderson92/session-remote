@@ -12,8 +12,8 @@ android {
         applicationId = "com.sessionremote.app"
         minSdk = 29
         targetSdk = 35
-        versionCode = 7
-        versionName = "1.6"
+        versionCode = 8
+        versionName = "1.7"
         // arm64 = your S24; x86_64 = the cloud emulator test. Keeps the APK small.
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }

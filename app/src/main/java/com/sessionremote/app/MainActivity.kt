@@ -34,6 +34,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
+        // Closing the app (back out / swipe away) undoes Stealth so the camera isn't left dark.
+        if (isFinishing) vm.restoreStealthOnExit()
         super.onStop()
         vm.onBackground()
     }
