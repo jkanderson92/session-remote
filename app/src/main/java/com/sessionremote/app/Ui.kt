@@ -119,6 +119,12 @@ fun App(vm: MainViewModel) {
         }
     }
 
+    val previewFull by vm.previewFull.collectAsState()
+    if (previewFull && preview is Preview.Live) {
+        BackHandler { vm.setPreviewFull(false) }
+        FullScreenPreview(ui, vm)
+    }
+
     viewing?.let { f ->
         BackHandler { viewing = null }
         MediaViewer(f, vm) { viewing = null }
@@ -300,72 +306,143 @@ fun ControlTab(ui: UiState, preview: Preview, vm: MainViewModel) {
     }
 }
 
+/** The live UDP player. Only one may exist at a time (it binds port 8554). */
+@Composable
+fun LivePlayer(software: Boolean, vm: MainViewModel, modifier: Modifier = Modifier) {
+    var state by remember(software) { mutableStateOf(PlayState.OPENING) }
+    Box(modifier.background(Color.Black), contentAlignment = Alignment.Center) {
+        key(software) {
+            VlcPlayer(
+                uri = "udp://@:${StreamProbe.PORT}",
+                options = listOf(":network-caching=300", ":clock-jitter=0", ":clock-synchro=0", ":no-audio") +
+                    (if (software) listOf(":codec=avcodec") else emptyList()),
+                modifier = Modifier.fillMaxSize(),
+                onState = { st ->
+                    if (st != state) vm.plog("player: $st${if (software) " (software)" else ""}")
+                    if (!(state == PlayState.VIDEO && st == PlayState.PLAYING)) state = st
+                    if (st == PlayState.ERROR) vm.previewPlayerFailed()
+                },
+            )
+        }
+        if (state == PlayState.OPENING || state == PlayState.PLAYING) {
+            Text(if (state == PlayState.OPENING) "Connecting to video…" else "Waiting for first frame…", color = TextDim)
+        }
+    }
+}
+
 @Composable
 fun PreviewCard(preview: Preview, connected: Boolean, vm: MainViewModel) {
     val log by vm.previewLog.collectAsState()
+    val full by vm.previewFull.collectAsState()
+    val software by vm.previewSoftware.collectAsState()
     val clipboard = LocalClipboardManager.current
-    var software by rememberSaveable { mutableStateOf(false) }
+    var showLog by rememberSaveable { mutableStateOf(false) }
     Card {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Label("Live preview", Modifier.weight(1f))
             when (preview) {
                 Preview.Off, is Preview.Failed ->
                     Button(onClick = { vm.startPreview() }, enabled = connected) { Text("Start") }
-                Preview.Starting -> Text("Trying…", color = TextDim)
-                is Preview.Live -> OutlinedButton(onClick = { vm.stopPreview() }) { Text("Stop") }
+                Preview.Starting -> Text("Starting…", color = TextDim)
+                is Preview.Live -> {
+                    Button(onClick = { vm.setPreviewFull(true) }) { Text("Full screen") }
+                    OutlinedButton(onClick = { vm.stopPreview() }) { Text("Stop") }
+                }
             }
         }
         when (preview) {
             is Preview.Live -> {
-                var state by remember { mutableStateOf(PlayState.OPENING) }
                 Spacer(Modifier.height(10.dp))
-                Box(
-                    Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(16f / 9f)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(Color.Black),
-                    contentAlignment = Alignment.Center
-                ) {
-                    key(software) {
-                        VlcPlayer(
-                            uri = "udp://@:${StreamProbe.PORT}",
-                            options = listOf(":network-caching=300", ":clock-jitter=0", ":clock-synchro=0", ":no-audio", ":demux=ts") +
-                                (if (software) listOf(":codec=avcodec") else emptyList()),
-                            modifier = Modifier.fillMaxSize(),
-                            onState = { st ->
-                                if (st != state) vm.plog("player: $st${if (software) " (software)" else ""}")
-                                if (!(state == PlayState.VIDEO && st == PlayState.PLAYING)) state = st
-                                if (st == PlayState.ERROR) vm.previewPlayerFailed()
-                            },
-                        )
-                    }
-                    if (state == PlayState.OPENING || state == PlayState.PLAYING) {
-                        Text(if (state == PlayState.OPENING) "Connecting to video…" else "Waiting for first frame…", color = TextDim)
-                    }
+                if (full) {
+                    Box(
+                        Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(12.dp)).background(Bg),
+                        contentAlignment = Alignment.Center
+                    ) { Text("Showing full screen", color = TextDim) }
+                } else {
+                    LivePlayer(
+                        software, vm,
+                        Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(12.dp))
+                            .clickable { vm.setPreviewFull(true) }
+                    )
                 }
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 6.dp)) {
-                    Text("Expect ~1 s delay, low resolution.", color = TextDim, fontSize = 12.sp, modifier = Modifier.weight(1f))
-                    Chip("Software decode", software, true) { software = !software }
+                    Text("Tap video for full screen. ~1 s delay.", color = TextDim, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                    Chip("Software decode", software, true) { vm.setPreviewSoftware(!software) }
                 }
             }
             is Preview.Failed -> Text(preview.reason, color = Warn, fontSize = 13.sp, modifier = Modifier.padding(top = 8.dp))
             else -> {}
         }
-        if (log.isNotEmpty() && preview != Preview.Off) {
-            Spacer(Modifier.height(8.dp))
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(Bg)
-                    .padding(10.dp)
-            ) {
-                log.takeLast(14).forEach {
-                    Text(it, color = TextDim, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+        if (log.isNotEmpty()) {
+            val open = showLog || preview is Preview.Failed
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = { showLog = !showLog }) { Text(if (open) "Hide log" else "Show log") }
+                if (open) TextButton(onClick = { clipboard.setText(AnnotatedString(log.joinToString("\n"))) }) { Text("Copy log") }
+            }
+            if (open) {
+                Column(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(Bg).padding(10.dp)
+                ) {
+                    log.takeLast(14).forEach {
+                        Text(it, color = TextDim, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                    }
                 }
             }
-            TextButton(onClick = { clipboard.setText(AnnotatedString(log.joinToString("\n"))) }) { Text("Copy log") }
+        }
+    }
+}
+
+/** Full-screen aiming view: landscape, video edge to edge, record button on top. */
+@Composable
+fun FullScreenPreview(ui: UiState, vm: MainViewModel) {
+    val context = LocalContext.current
+    val software by vm.previewSoftware.collectAsState()
+    DisposableEffect(Unit) {
+        val activity = context as? android.app.Activity
+        activity?.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        onDispose { activity?.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED }
+    }
+    val s = ui.status
+    val recording = s?.recording == true
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        LivePlayer(software, vm, Modifier.fillMaxSize())
+        Text(
+            "✕", color = Color.White, fontSize = 26.sp,
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(16.dp)
+                .clip(CircleShape)
+                .background(Color(0x88000000))
+                .clickable { vm.setPreviewFull(false) }
+                .padding(horizontal = 16.dp, vertical = 8.dp)
+        )
+        if (recording) {
+            Text(
+                "● REC ${fmtDuration(s?.recordSeconds ?: 0)}",
+                color = Rec, fontSize = 18.sp, fontWeight = FontWeight.Bold,
+                modifier = Modifier.align(Alignment.TopCenter).padding(20.dp)
+                    .clip(RoundedCornerShape(8.dp)).background(Color(0x88000000)).padding(horizontal = 10.dp, vertical = 4.dp)
+            )
+        }
+        // Record button
+        Box(
+            Modifier
+                .align(Alignment.CenterEnd)
+                .padding(24.dp)
+                .size(76.dp)
+                .alpha(if (ui.conn == Conn.CONNECTED && !ui.working) 1f else 0.4f)
+                .clip(CircleShape)
+                .border(4.dp, Color.White, CircleShape)
+                .clickable(enabled = ui.conn == Conn.CONNECTED && !ui.working) { vm.toggleRecord() }
+                .padding(10.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Box(
+                Modifier
+                    .size(if (recording) 28.dp else 56.dp)
+                    .clip(if (recording) RoundedCornerShape(6.dp) else CircleShape)
+                    .background(Rec)
+            )
         }
     }
 }

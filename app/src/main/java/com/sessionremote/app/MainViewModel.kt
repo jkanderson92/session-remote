@@ -299,6 +299,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- Live preview ----
 
+    private val _previewFull = MutableStateFlow(false)
+    val previewFull: StateFlow<Boolean> = _previewFull.asStateFlow()
+    fun setPreviewFull(on: Boolean) { _previewFull.value = on }
+
+    private val _previewSoftware = MutableStateFlow(false)
+    val previewSoftware: StateFlow<Boolean> = _previewSoftware.asStateFlow()
+    fun setPreviewSoftware(on: Boolean) { _previewSoftware.value = on }
+
     private val _previewLog = MutableStateFlow<List<String>>(emptyList())
     val previewLog: StateFlow<List<String>> = _previewLog.asStateFlow()
     private var logStart = 0L
@@ -346,7 +354,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     plog("probe: ${probe.packets} packets, ${probe.bytes} bytes, from=${probe.from ?: "-"}, first=${probe.firstHex ?: "-"}")
                     if (probe.packets > 0) {
                         val ts = probe.firstHex?.startsWith("47") == true
-                        plog(if (ts) "looks like MPEG-TS (0x47 sync) -> handing to player" else "data is NOT MPEG-TS -> player may fail")
+                        plog(if (ts) "stream: MPEG-TS -> player" else "stream: GoPro framing -> player")
                         plog(clientsLine())
                         _preview.value = Preview.Live(probe.bytes / 1024)
                         return@launch
@@ -368,6 +376,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun stopPreview() {
         if (_preview.value == Preview.Off) return
+        _previewFull.value = false
         _preview.value = Preview.Off
         viewModelScope.launch { api.stopStream() }
     }
