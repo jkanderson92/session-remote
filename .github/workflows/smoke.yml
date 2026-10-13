@@ -5,6 +5,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   smoke:
     runs-on: ubuntu-latest
@@ -46,9 +49,20 @@ jobs:
             echo "===== CRASH LINES ====="
             grep -A 40 -E "FATAL EXCEPTION|AndroidRuntime" logcat.txt | head -120 || true
             echo "===== APP PROCESS ====="
-            adb shell pidof com.sessionremote.app && echo "APP STILL RUNNING" || echo "APP NOT RUNNING"
+            if adb shell pidof com.sessionremote.app; then echo "RUNNING" > result.txt; else echo "CRASHED" > result.txt; fi
+            grep -A 40 -E "FATAL EXCEPTION" logcat.txt | head -80 > crash.txt || true
             adb shell screencap -p /sdcard/shot.png
             adb pull /sdcard/shot.png shot.png || true
+
+      - name: Report result as commit comment
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          R=$(cat result.txt 2>/dev/null || echo "NO RESULT")
+          { echo "SMOKE: $R"; echo '```'; cat crash.txt 2>/dev/null; echo '```'; } > body.md
+          gh api repos/${{ github.repository }}/commits/${{ github.sha }}/comments -F body=@body.md > /dev/null
+          [ "$R" = "RUNNING" ]
 
       - uses: actions/upload-artifact@v4
         if: always()
