@@ -73,6 +73,9 @@ class GoProApi {
 
     suspend fun setSetting(id: Int, value: Int) { get("/gp/gpControl/setting/$id/$value") }
 
+    /** Puts the camera to sleep. Its Wi-Fi stays in low-power standby so Wake-on-LAN can bring it back. */
+    suspend fun sleep() { get("/gp/gpControl/command/system/sleep") }
+
     /** Tells the camera a remote app finished connecting, so it stops its "searching"/pairing countdown. */
     suspend fun pairComplete() {
         get("/gp/gpControl/command/wireless/pair/complete?success=1&deviceName=SessionRemote")

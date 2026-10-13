@@ -57,6 +57,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -226,6 +227,24 @@ fun ControlTab(ui: UiState, preview: Preview, vm: MainViewModel) {
         // Big shutter
         ShutterArea(ui, vm, connected)
 
+        // Power
+        Card {
+            Label("Camera power")
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedButton(
+                    onClick = { vm.sleepCamera() },
+                    enabled = connected && !ui.working && s?.recording != true,
+                    modifier = Modifier.weight(1f)
+                ) { Text("Turn off") }
+                Button(onClick = { vm.wake() }, modifier = Modifier.weight(1f)) { Text("Wake camera") }
+            }
+            Text(
+                if (ui.savedMac != null) "Wake works while the phone stays on the camera's Wi-Fi."
+                else "Wake needs one normal connection first so the app can learn the camera's address.",
+                color = TextDim, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp)
+            )
+        }
+
         // Live preview
         Card {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -376,7 +395,7 @@ fun StorageCard(s: CameraStatus?, modifier: Modifier) {
                     if (video != null) fmtDuration(video) else "—",
                     color = TextMain, fontSize = 20.sp, fontWeight = FontWeight.Bold
                 )
-                Text("video left at current settings", color = TextDim, fontSize = 12.sp)
+                Text("video left (camera's own figure)", color = TextDim, fontSize = 12.sp)
                 s.remainingPhotos?.let { Text("$it photos left", color = TextDim, fontSize = 12.sp) }
                 s.remainingSpaceKb?.let { Text("${fmtFree(it)} free", color = TextDim, fontSize = 12.sp) }
             }
@@ -396,9 +415,9 @@ private val VIDEO_SETTINGS = listOf(
     )),
     SettingDef(3, "Frame rate", listOf(
         Opt("25", 9), Opt("30", 8), Opt("48", 7), Opt("50", 6), Opt("60", 5),
-        Opt("90", 3), Opt("100", 2), Opt("120", 1),
+        Opt("100", 2), Opt("120", 1),
     )),
-    SettingDef(4, "Field of view", listOf(Opt("Wide", 0), Opt("Medium", 1), Opt("Narrow", 2))),
+    SettingDef(4, "Field of view", listOf(Opt("Ultra Wide", 0), Opt("Medium", 1))),
 )
 
 private val AUTO_OFF = SettingDef(59, "Auto off", listOf(
@@ -436,14 +455,38 @@ fun SettingsTab(ui: UiState, vm: MainViewModel) {
         if (!connected) Text("Connect to the camera to change settings.", color = TextDim)
         if (s?.recording == true) Text("Stop recording to change settings.", color = Warn)
         Text(
-            "Not every resolution supports every frame rate. The camera rejects invalid combos — you'll get a message, nothing breaks.",
+            "Options that don't work with your current resolution are crossed out.",
             color = TextDim, fontSize = 13.sp
         )
         SectionTitle("Video")
-        VIDEO_SETTINGS.forEach { SettingRow(it, s, enabled, vm) }
+        val res = s?.settings?.get(2)
+        SettingRow(
+            VIDEO_SETTINGS[0], s, enabled, vm,
+            note = "FPS and FOV adjust automatically if the new resolution needs it.",
+            onPick = { vm.setResolution(it) },
+        )
+        SettingRow(
+            VIDEO_SETTINGS[1], s, enabled, vm,
+            note = "Crossed out = not available at this resolution.",
+            allowed = { SessionModes.fpsAllowed(res, it) },
+        )
+        SettingRow(
+            VIDEO_SETTINGS[2], s, enabled, vm,
+            note = if (res == 8 || res == 11) "SuperView resolutions use their own fixed field of view." else null,
+            allowed = { SessionModes.fovAllowed(res, it) },
+        )
 
         SectionTitle("Camera")
         SettingRow(AUTO_OFF, s, connected && !ui.working, vm)
+        Card {
+            Label("Red recording LED")
+            val ledOn = s?.settings?.get(55)?.let { it != 0 }
+            Row {
+                Chip("Off", ledOn == false, connected && !ui.working, Modifier.weight(1f)) { vm.setLed(false) }
+                Chip("On", ledOn == true, connected && !ui.working, Modifier.weight(1f)) { vm.setLed(true) }
+            }
+            if (connected && ledOn == null) Text("Camera doesn't report LED state; buttons still send the command.", color = TextDim, fontSize = 12.sp)
+        }
         Text("Auto off controls the camera's sleep timer. If an option is rejected, your firmware doesn't support it.", color = TextDim, fontSize = 13.sp)
 
         SectionTitle("Protune")
@@ -466,15 +509,24 @@ fun SettingsTab(ui: UiState, vm: MainViewModel) {
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun SettingRow(def: SettingDef, s: CameraStatus?, enabled: Boolean, vm: MainViewModel) {
+fun SettingRow(
+    def: SettingDef,
+    s: CameraStatus?,
+    enabled: Boolean,
+    vm: MainViewModel,
+    note: String? = null,
+    allowed: (Int) -> Boolean = { true },
+    onPick: (Int) -> Unit = { vm.setSetting(def.id, it) },
+) {
     val current = s?.settings?.get(def.id)
     Card {
         Label(def.title)
         FlowRow {
             def.opts.forEach { o ->
-                Chip(o.label, current == o.value, enabled) { vm.setSetting(def.id, o.value) }
+                Chip(o.label, current == o.value, enabled, crossed = !allowed(o.value)) { onPick(o.value) }
             }
         }
+        note?.let { Text(it, color = TextDim, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp)) }
     }
 }
 
@@ -584,14 +636,14 @@ fun SectionTitle(text: String) {
 }
 
 @Composable
-fun Chip(text: String, selected: Boolean, enabled: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+fun Chip(text: String, selected: Boolean, enabled: Boolean, modifier: Modifier = Modifier, crossed: Boolean = false, onClick: () -> Unit) {
     Box(
         modifier
             .padding(3.dp)
-            .alpha(if (enabled || selected) 1f else 0.4f)
+            .alpha(if (crossed && !selected) 0.35f else if (enabled || selected) 1f else 0.4f)
             .clip(RoundedCornerShape(12.dp))
             .background(if (selected) Accent else Surface2)
-            .clickable(enabled = enabled && !selected, onClick = onClick)
+            .clickable(enabled = enabled && !selected && !crossed, onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 14.dp),
         contentAlignment = Alignment.Center
     ) {
@@ -600,6 +652,7 @@ fun Chip(text: String, selected: Boolean, enabled: Boolean, modifier: Modifier =
             color = if (selected) Color.Black else TextMain,
             fontSize = 15.sp,
             fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+            textDecoration = if (crossed) TextDecoration.LineThrough else null,
             textAlign = TextAlign.Center
         )
     }

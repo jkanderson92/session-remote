@@ -209,6 +209,41 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setSetting(id: Int, value: Int) = act("Setting change") { api.setSetting(id, value) }
 
+    /** Changes resolution and moves FPS/FOV to the closest values that resolution supports. */
+    fun setResolution(res: Int) = act("Resolution change") {
+        val st = _ui.value.status?.settings ?: emptyMap()
+        val fps = SessionModes.bestFps(res, st[3])
+        val fov = SessionModes.bestFov(res, st[4])
+        try {
+            api.setSetting(2, res)
+        } catch (e: CameraHttpException) {
+            // Camera refused because the current FPS doesn't fit the new resolution: fix FPS, retry.
+            if (fps == null || fps == st[3]) throw e
+            api.setSetting(3, fps)
+            delay(250)
+            api.setSetting(2, res)
+        }
+        delay(250)
+        val now = runCatching { api.status().settings }.getOrDefault(st)
+        if (fps != null && now[3] != fps && !SessionModes.fpsAllowed(res, now[3] ?: -1)) api.setSetting(3, fps)
+        if (fov != null && now[4] != fov && !SessionModes.fovAllowed(res, now[4] ?: -1)) api.setSetting(4, fov)
+    }
+
+    /** Red LED (setting 55). HERO4 firmware differs on the "on" value, so fall back from 2 to 1. */
+    fun setLed(on: Boolean) = act("LED change") {
+        if (!on) {
+            api.setSetting(55, 0)
+        } else {
+            try { api.setSetting(55, 2) } catch (e: CameraHttpException) { api.setSetting(55, 1) }
+        }
+    }
+
+    fun sleepCamera() = act("Turn off") {
+        stopPreview()
+        api.sleep()
+        say("Camera turned off. Tap Wake camera to turn it back on.")
+    }
+
     fun wake() {
         val mac = _ui.value.savedMac
         if (mac == null) {
