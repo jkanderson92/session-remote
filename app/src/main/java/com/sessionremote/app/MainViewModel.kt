@@ -238,6 +238,29 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun deleteFiles(files: List<CamFile>, onDone: () -> Unit = {}) = act("Delete") {
+        var failed = 0
+        for (f in files) {
+            try {
+                api.deleteFile(f)
+                _media.update { m -> m.copy(files = m.files.filterNot { it.key == f.key }) }
+            } catch (e: Exception) {
+                failed++
+            }
+        }
+        if (failed > 0) say("$failed of ${files.size} files couldn't be deleted. The camera may be busy; try again.")
+        else say(if (files.size == 1) "Deleted ${files[0].name}." else "Deleted ${files.size} files.")
+        onDone()
+    }
+
+    fun deleteAll() = act("Delete all") {
+        api.deleteAll()
+        _media.update { it.copy(files = emptyList()) }
+        say("SD card cleared.")
+        delay(800)
+        loadMedia()
+    }
+
     fun sleepCamera() = act("Turn off") {
         stopPreview()
         api.sleep()

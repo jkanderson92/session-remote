@@ -29,7 +29,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedButton
@@ -535,16 +537,46 @@ fun SettingRow(
 @Composable
 fun MediaTab(ui: UiState, media: MediaUi, vm: MainViewModel, onOpen: (CamFile) -> Unit) {
     val connected = ui.conn == Conn.CONNECTED
+    var selecting by remember { mutableStateOf(false) }
+    var selected by remember { mutableStateOf(setOf<String>()) }
+    var confirm by remember { mutableStateOf<String?>(null) } // "selected" | "all"
+    val totalBytes = media.files.sumOf { it.sizeBytes ?: 0L }
     LaunchedEffect(connected) {
         if (connected && media.files.isEmpty() && media.error == null) vm.loadMedia()
     }
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
-        Row(Modifier.fillMaxWidth().padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                if (media.loading) "Loading…" else "${media.files.size} files on camera",
-                color = TextMain, fontSize = 16.sp, modifier = Modifier.weight(1f)
-            )
-            Button(onClick = { vm.loadMedia() }, enabled = connected && !media.loading) { Text("Refresh") }
+        Row(Modifier.fillMaxWidth().padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    when {
+                        selecting -> "${selected.size} selected"
+                        media.loading -> "Loading…"
+                        else -> "${media.files.size} files"
+                    },
+                    color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.SemiBold
+                )
+                if (!selecting && totalBytes > 0) Text(fmtBytes(totalBytes), color = TextDim, fontSize = 12.sp)
+            }
+            if (selecting) {
+                OutlinedButton(onClick = { selecting = false; selected = emptySet() }) { Text("Cancel") }
+                Button(
+                    onClick = { confirm = "selected" },
+                    enabled = connected && selected.isNotEmpty() && !ui.working,
+                    colors = ButtonDefaults.buttonColors(containerColor = Rec)
+                ) { Text("Delete") }
+            } else {
+                OutlinedButton(onClick = { selecting = true }, enabled = connected && media.files.isNotEmpty()) { Text("Select") }
+                Button(onClick = { vm.loadMedia() }, enabled = connected && !media.loading) { Text("Refresh") }
+            }
+        }
+        if (selecting) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(bottom = 8.dp)) {
+                OutlinedButton(onClick = { selected = media.files.map { it.key }.toSet() }) { Text("Select all") }
+                OutlinedButton(
+                    onClick = { confirm = "all" },
+                    enabled = connected && !ui.working,
+                ) { Text("Wipe SD card", color = Rec) }
+            }
         }
         if (ui.status?.recording == true) {
             Text("Downloading while recording may fail.", color = Warn, fontSize = 13.sp)
@@ -555,22 +587,51 @@ fun MediaTab(ui: UiState, media: MediaUi, vm: MainViewModel, onOpen: (CamFile) -
         }
         LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             items(media.files, key = { it.key }) { f ->
-                MediaRow(f, media.progress[f.key], f.key in media.done, connected, vm) { onOpen(f) }
+                MediaRow(
+                    f, media.progress[f.key], f.key in media.done, connected, vm,
+                    selecting = selecting, isSelected = f.key in selected,
+                ) {
+                    if (selecting) selected = if (f.key in selected) selected - f.key else selected + f.key
+                    else onOpen(f)
+                }
             }
             item { Spacer(Modifier.height(24.dp)) }
         }
     }
+
+    confirm?.let { what ->
+        val count = if (what == "all") media.files.size else selected.size
+        AlertDialog(
+            onDismissRequest = { confirm = null },
+            title = { Text(if (what == "all") "Wipe the SD card?" else "Delete $count file${if (count == 1) "" else "s"}?") },
+            text = { Text(if (what == "all") "Every photo and video on the camera will be deleted. This can't be undone." else "They'll be removed from the camera's SD card. This can't be undone.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirm = null
+                    if (what == "all") vm.deleteAll()
+                    else vm.deleteFiles(media.files.filter { it.key in selected })
+                    selecting = false
+                    selected = emptySet()
+                }) { Text("Delete", color = Rec) }
+            },
+            dismissButton = { TextButton(onClick = { confirm = null }) { Text("Cancel") } },
+        )
+    }
 }
 
 @Composable
-fun MediaRow(f: CamFile, progress: Float?, done: Boolean, connected: Boolean, vm: MainViewModel, onOpen: () -> Unit) {
+fun MediaRow(
+    f: CamFile, progress: Float?, done: Boolean, connected: Boolean, vm: MainViewModel,
+    selecting: Boolean = false, isSelected: Boolean = false, onOpen: () -> Unit,
+) {
     var thumb by remember(f.key) { mutableStateOf<Bitmap?>(null) }
     LaunchedEffect(f.key, connected) { if (connected && thumb == null) thumb = vm.thumbnail(f) }
     Row(
         Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(14.dp))
-            .background(Surface1)
+            .background(if (isSelected) Color(0xFF2A1A1C) else Surface1)
+            .border(2.dp, if (isSelected) Rec else Color.Transparent, RoundedCornerShape(14.dp))
             .clickable(enabled = connected, onClick = onOpen)
             .padding(10.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -603,6 +664,7 @@ fun MediaRow(f: CamFile, progress: Float?, done: Boolean, connected: Boolean, vm
         when {
             progress != null -> Text("${(progress * 100).toInt()}%", color = TextMain)
             done -> Text("Saved", color = Good, fontWeight = FontWeight.Bold)
+            selecting -> Text(if (isSelected) "✓" else "○", color = if (isSelected) Rec else TextDim, fontSize = 24.sp)
             else -> Button(
                 onClick = { vm.download(f) },
                 enabled = connected,

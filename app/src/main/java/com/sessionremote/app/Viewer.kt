@@ -17,7 +17,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -48,6 +50,7 @@ import org.videolan.libvlc.MediaPlayer
 @Composable
 fun MediaViewer(f: CamFile, vm: MainViewModel, onClose: () -> Unit) {
     val media by vm.media.collectAsState()
+    var askDelete by remember { mutableStateOf(false) }
     Box(
         Modifier
             .fillMaxSize()
@@ -76,7 +79,23 @@ fun MediaViewer(f: CamFile, vm: MainViewModel, onClose: () -> Unit) {
                 f.key in media.done -> Text("Saved", color = Good, fontWeight = FontWeight.Bold)
                 else -> Button(onClick = { vm.download(f) }) { Text("Save") }
             }
+            Text(
+                "🗑", fontSize = 22.sp,
+                modifier = Modifier.clip(CircleShape).clickable { askDelete = true }.padding(horizontal = 12.dp, vertical = 6.dp)
+            )
         }
+    }
+
+    if (askDelete) {
+        AlertDialog(
+            onDismissRequest = { askDelete = false },
+            title = { Text("Delete ${f.name}?") },
+            text = { Text("It will be removed from the camera's SD card. This can't be undone.") },
+            confirmButton = {
+                TextButton(onClick = { askDelete = false; vm.deleteFiles(listOf(f)) { onClose() } }) { Text("Delete", color = Rec) }
+            },
+            dismissButton = { TextButton(onClick = { askDelete = false }) { Text("Cancel") } },
+        )
     }
 }
 

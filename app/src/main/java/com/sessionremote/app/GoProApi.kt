@@ -74,6 +74,11 @@ class GoProApi {
     suspend fun setSetting(id: Int, value: Int) { get("/gp/gpControl/setting/$id/$value") }
 
     /** Puts the camera to sleep. Its Wi-Fi stays in low-power standby so Wake-on-LAN can bring it back. */
+    /** Deletes one file; the camera removes its .LRV/.THM companions itself. */
+    suspend fun deleteFile(f: CamFile) { get("/gp/gpControl/command/storage/delete?p=${f.dir}/${f.name}") }
+
+    suspend fun deleteAll() { get("/gp/gpControl/command/storage/delete/all") }
+
     suspend fun sleep() { get("/gp/gpControl/command/system/sleep") }
 
     /** Tells the camera a remote app finished connecting, so it stops its "searching"/pairing countdown. */
