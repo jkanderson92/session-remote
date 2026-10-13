@@ -60,6 +60,9 @@ class GoProApi {
         }
     }
 
+    /** Any GET path, returns the body. Used for diagnostics. */
+    suspend fun raw(path: String): String = get(path)
+
     suspend fun status(): CameraStatus = CameraStatus.parse(JSONObject(get("/gp/gpControl/status")))
 
     suspend fun info(): JSONObject = JSONObject(get("/gp/gpControl/info")).optJSONObject("info") ?: JSONObject()

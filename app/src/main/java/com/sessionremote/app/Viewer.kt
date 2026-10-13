@@ -164,11 +164,11 @@ private fun VideoView(f: CamFile, vm: MainViewModel) {
                 Button(onClick = {
                     val p = player ?: return@Button
                     when (state) {
-                        PlayState.PLAYING -> p.pause()
+                        PlayState.PLAYING, PlayState.VIDEO -> p.pause()
                         PlayState.ENDED -> { p.stop(); p.play() }
                         else -> p.play()
                     }
-                }) { Text(if (state == PlayState.PLAYING) "Pause" else "Play") }
+                }) { Text(if (state == PlayState.PLAYING || state == PlayState.VIDEO) "Pause" else "Play") }
                 Chip(
                     if (fullQuality) "Full quality" else "Low-res",
                     selected = fullQuality, enabled = true,

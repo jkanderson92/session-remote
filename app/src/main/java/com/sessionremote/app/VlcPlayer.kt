@@ -21,7 +21,7 @@ object Vlc {
     }
 }
 
-enum class PlayState { OPENING, PLAYING, PAUSED, ENDED, ERROR }
+enum class PlayState { OPENING, PLAYING, VIDEO, PAUSED, ENDED, ERROR }
 
 /**
  * Plays [uri] (udp://@:8554 live preview, or http:// camera files) with libVLC.
@@ -52,6 +52,7 @@ fun VlcPlayer(
                 MediaPlayer.Event.Paused -> onState(PlayState.PAUSED)
                 MediaPlayer.Event.EndReached -> onState(PlayState.ENDED)
                 MediaPlayer.Event.EncounteredError -> onState(PlayState.ERROR)
+                MediaPlayer.Event.Vout -> if (ev.voutCount > 0) onState(PlayState.VIDEO)
                 else -> {}
             }
         }

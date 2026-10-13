@@ -41,34 +41,50 @@ class KeepAlive {
     }
 }
 
+data class ProbeResult(val packets: Int, val bytes: Long, val from: String?, val firstHex: String?)
+
 object StreamProbe {
     const val PORT = 8554
+    private val KEEP_ALIVE = "_GPHD_:0:0:2:0.000000\n".toByteArray()
 
     /**
-     * Listens on the preview port for [millis] and returns bytes received.
-     * 0 = the camera isn't sending video at all (vs. the player failing to decode it).
-     * The socket is closed before returning so the player can bind the same port.
+     * Listens on the preview port for [millis]. Optionally sends the keep-alive from this same
+     * socket (source port 8554), which some firmware wants. Closed before returning so the player can bind.
      */
-    suspend fun bytesReceived(millis: Long = 3000): Long = withContext(Dispatchers.IO) {
+    suspend fun probe(millis: Long, keepAliveFromSocket: Boolean): ProbeResult = withContext(Dispatchers.IO) {
+        var packets = 0
         var total = 0L
+        var from: String? = null
+        var first: String? = null
         val sock = DatagramSocket(null)
         try {
             sock.reuseAddress = true
             sock.bind(InetSocketAddress(PORT))
-            sock.soTimeout = 300
+            sock.soTimeout = 250
+            val cam = InetAddress.getByName(GoProApi.HOST)
             val buf = ByteArray(65536)
             val end = System.currentTimeMillis() + millis
+            var nextKa = 0L
             while (System.currentTimeMillis() < end) {
+                if (keepAliveFromSocket && System.currentTimeMillis() >= nextKa) {
+                    runCatching { sock.send(DatagramPacket(KEEP_ALIVE, KEEP_ALIVE.size, cam, PORT)) }
+                    nextKa = System.currentTimeMillis() + 1000
+                }
                 try {
                     val p = DatagramPacket(buf, buf.size)
                     sock.receive(p)
+                    packets++
                     total += p.length
+                    if (first == null) {
+                        from = "${p.address?.hostAddress}:${p.port}"
+                        first = (0 until minOf(8, p.length)).joinToString("") { String.format("%02x", buf[it]) }
+                    }
                 } catch (_: SocketTimeoutException) {
                 }
             }
         } finally {
             sock.close()
         }
-        total
+        ProbeResult(packets, total, from, first)
     }
 }

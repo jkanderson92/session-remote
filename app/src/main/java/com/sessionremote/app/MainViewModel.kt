@@ -44,6 +44,7 @@ data class UiState(
     val modelName: String? = null,
     val firmware: String? = null,
     val savedMac: String? = null,
+    val locating: Boolean = false,
 )
 
 data class MediaUi(
@@ -210,8 +211,25 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun setSetting(id: Int, value: Int) = act("Setting change") { api.setSetting(id, value) }
 
     /** Changes resolution and moves FPS/FOV to the closest values that resolution supports. */
-    fun setResolution(res: Int) = act("Resolution change") {
-        val st = _ui.value.status?.settings ?: emptyMap()
+    fun setResolution(res: Int) = act("Resolution change") { changeResolution(res) }
+
+    /** One-tap preset: video mode, resolution, then exact FPS and FOV. */
+    fun applyPreset(res: Int, fps: Int, fov: Int) = act("Preset") {
+        if (_ui.value.status?.mode != 0) { api.setMode(0); delay(400) }
+        changeResolution(res)
+        delay(250)
+        val now = runCatching { api.status().settings }.getOrDefault(emptyMap())
+        if (now[3] != fps) api.setSetting(3, fps)
+        if (now[4] != fov) runCatching { api.setSetting(4, fov) }
+    }
+
+    fun setLocate(on: Boolean) = act("Locate") {
+        api.raw("/gp/gpControl/command/system/locate?p=${if (on) 1 else 0}")
+        _ui.update { it.copy(locating = on) }
+    }
+
+    private suspend fun changeResolution(res: Int) {
+        val st = runCatching { api.status().settings }.getOrNull() ?: _ui.value.status?.settings ?: emptyMap()
         val fps = SessionModes.bestFps(res, st[3])
         val fov = SessionModes.bestFov(res, st[4])
         try {
@@ -281,28 +299,70 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- Live preview ----
 
+    private val _previewLog = MutableStateFlow<List<String>>(emptyList())
+    val previewLog: StateFlow<List<String>> = _previewLog.asStateFlow()
+    private var logStart = 0L
+
+    fun plog(line: String) {
+        val t = (System.currentTimeMillis() - logStart) / 100 / 10.0
+        _previewLog.update { it + "[${t}s] $line" }
+    }
+
+    private suspend fun clientsLine(): String = runCatching {
+        val s = api.status()
+        "status: clients(31)=${s.clients} streaming(32)=${if (s.streaming) 1 else 0} mode=${s.mode} busy=${s.busy}"
+    }.getOrElse { "status read failed: ${describe(it)}" }
+
+    /**
+     * Tries the known ways to start the HERO4 stream, one by one, until UDP video arrives.
+     * Every step is logged so a failure can be pinned down from one test.
+     */
     fun startPreview() {
         if (_preview.value is Preview.Starting) return
         viewModelScope.launch {
             _preview.value = Preview.Starting
-            try {
-                api.startStream()
-                keepAlive.start(viewModelScope)
-                val bytes = StreamProbe.bytesReceived(3000)
-                _preview.value = if (bytes == 0L) {
-                    Preview.Failed("The camera accepted the start command but sent no video in 3 s. Try again, or switch modes once and retry.")
-                } else {
-                    Preview.Live(bytes / 1024)
+            logStart = System.currentTimeMillis()
+            _previewLog.value = emptyList()
+            plog("model=${_ui.value.modelName} fw=${_ui.value.firmware} wifiBound=${network != null}")
+            plog(clientsLine())
+            keepAlive.start(viewModelScope)
+
+            data class Attempt(val name: String, val cmd: String?, val keepAliveFrom8554: Boolean)
+            val attempts = listOf(
+                Attempt("A proto_v2 restart", "/gp/gpControl/execute?p1=gpStream&a1=proto_v2&c1=restart", false),
+                Attempt("B proto_v2 restart + keep-alive from :8554", "/gp/gpControl/execute?p1=gpStream&a1=proto_v2&c1=restart", true),
+                Attempt("C plain restart + keep-alive from :8554", "/gp/gpControl/execute?p1=gpStream&c1=restart", true),
+                Attempt("D no command (Session fw2 style) + keep-alive from :8554", null, true),
+            )
+            for (a in attempts) {
+                plog("--- ${a.name}")
+                if (a.cmd != null) {
+                    val r = runCatching { api.raw(a.cmd) }
+                    plog(r.fold({ "cmd OK: ${it.take(80)}" }, { "cmd FAILED: ${describe(it)}" }))
                 }
-            } catch (e: Exception) {
-                _preview.value = Preview.Failed("Couldn't start preview: ${describe(e)}")
+                val probe = runCatching { StreamProbe.probe(2500, a.keepAliveFrom8554) }
+                    .getOrElse { plog("probe error: ${it.javaClass.simpleName}: ${it.message}"); null }
+                if (probe != null) {
+                    plog("probe: ${probe.packets} packets, ${probe.bytes} bytes, from=${probe.from ?: "-"}, first=${probe.firstHex ?: "-"}")
+                    if (probe.packets > 0) {
+                        val ts = probe.firstHex?.startsWith("47") == true
+                        plog(if (ts) "looks like MPEG-TS (0x47 sync) -> handing to player" else "data is NOT MPEG-TS -> player may fail")
+                        plog(clientsLine())
+                        _preview.value = Preview.Live(probe.bytes / 1024)
+                        return@launch
+                    }
+                }
+                plog(clientsLine())
             }
+            plog("no UDP video arrived with any method")
+            _preview.value = Preview.Failed("No video arrived from the camera with any start method. Tap Copy log and send it to me.")
         }
     }
 
     fun previewPlayerFailed() {
         if (_preview.value is Preview.Live) {
-            _preview.value = Preview.Failed("Video is arriving, but the player couldn't decode it.")
+            plog("player reported an error")
+            _preview.value = Preview.Failed("Video is arriving, but the player couldn't decode it. Try Software decode, or Copy log and send it to me.")
         }
     }
 

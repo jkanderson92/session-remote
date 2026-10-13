@@ -58,6 +58,10 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.runtime.key
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
@@ -186,6 +190,15 @@ fun MessageBar(text: String, onDismiss: () -> Unit) {
 
 // ---------- Control ----------
 
+data class Preset(val name: String, val detail: String, val res: Int, val fps: Int, val fov: Int)
+
+val PRESETS = listOf(
+    Preset("Max detail", "1440p · 30", 7, 8, 0),
+    Preset("Action", "1080p · 60", 9, 5, 0),
+    Preset("Wide action", "1080p SV · 48", 8, 7, 0),
+    Preset("Slow-mo", "WVGA · 120", 13, 1, 0),
+)
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ControlTab(ui: UiState, preview: Preview, vm: MainViewModel) {
@@ -202,6 +215,8 @@ fun ControlTab(ui: UiState, preview: Preview, vm: MainViewModel) {
             BatteryCard(s, Modifier.weight(1f))
             StorageCard(s, Modifier.weight(1f))
         }
+
+        PreviewCard(preview, connected, vm)
 
         // Mode selector
         Card {
@@ -226,19 +241,55 @@ fun ControlTab(ui: UiState, preview: Preview, vm: MainViewModel) {
             }
         }
 
+        // Presets
+        Card {
+            Label("Video presets")
+            val st = s?.settings
+            FlowRow {
+                PRESETS.forEach { p ->
+                    val active = s?.mode == 0 && st?.get(2) == p.res && st[3] == p.fps
+                    Column(
+                        Modifier
+                            .padding(3.dp)
+                            .alpha(if (connected && !ui.working || active) 1f else 0.4f)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (active) Accent else Surface2)
+                            .clickable(enabled = connected && !ui.working && !active && s?.recording != true) { vm.applyPreset(p.res, p.fps, p.fov) }
+                            .padding(horizontal = 14.dp, vertical = 10.dp)
+                    ) {
+                        Text(p.name, color = if (active) Color.Black else TextMain, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                        Text(p.detail, color = if (active) Color.Black else TextDim, fontSize = 12.sp)
+                    }
+                }
+            }
+        }
+
         // Big shutter
         ShutterArea(ui, vm, connected)
 
-        // Power
+        // Power + locate
         Card {
-            Label("Camera power")
+            Label("Camera")
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedButton(
                     onClick = { vm.sleepCamera() },
                     enabled = connected && !ui.working && s?.recording != true,
                     modifier = Modifier.weight(1f)
                 ) { Text("Turn off") }
-                Button(onClick = { vm.wake() }, modifier = Modifier.weight(1f)) { Text("Wake camera") }
+                Button(onClick = { vm.wake() }, modifier = Modifier.weight(1f)) { Text("Wake") }
+            }
+            Spacer(Modifier.height(8.dp))
+            if (ui.locating) {
+                Button(
+                    onClick = { vm.setLocate(false) },
+                    enabled = connected,
+                    colors = ButtonDefaults.buttonColors(containerColor = Warn),
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Stop beeping", color = Color.Black) }
+            } else {
+                OutlinedButton(onClick = { vm.setLocate(true) }, enabled = connected, modifier = Modifier.fillMaxWidth()) {
+                    Text("Beep to find camera")
+                }
             }
             Text(
                 if (ui.savedMac != null) "Wake works while the phone stays on the camera's Wi-Fi."
@@ -246,49 +297,75 @@ fun ControlTab(ui: UiState, preview: Preview, vm: MainViewModel) {
                 color = TextDim, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp)
             )
         }
+    }
+}
 
-        // Live preview
-        Card {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Label("Live preview", Modifier.weight(1f))
-                when (preview) {
-                    Preview.Off, is Preview.Failed ->
-                        Button(onClick = { vm.startPreview() }, enabled = connected) { Text("Start") }
-                    Preview.Starting -> Text("Starting…", color = TextDim)
-                    is Preview.Live -> OutlinedButton(onClick = { vm.stopPreview() }) { Text("Stop") }
-                }
-            }
+@Composable
+fun PreviewCard(preview: Preview, connected: Boolean, vm: MainViewModel) {
+    val log by vm.previewLog.collectAsState()
+    val clipboard = LocalClipboardManager.current
+    var software by rememberSaveable { mutableStateOf(false) }
+    Card {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Label("Live preview", Modifier.weight(1f))
             when (preview) {
-                is Preview.Live -> {
-                    var state by remember { mutableStateOf(PlayState.OPENING) }
-                    Spacer(Modifier.height(10.dp))
-                    Box(
-                        Modifier
-                            .fillMaxWidth()
-                            .aspectRatio(16f / 9f)
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(Color.Black),
-                        contentAlignment = Alignment.Center
-                    ) {
+                Preview.Off, is Preview.Failed ->
+                    Button(onClick = { vm.startPreview() }, enabled = connected) { Text("Start") }
+                Preview.Starting -> Text("Trying…", color = TextDim)
+                is Preview.Live -> OutlinedButton(onClick = { vm.stopPreview() }) { Text("Stop") }
+            }
+        }
+        when (preview) {
+            is Preview.Live -> {
+                var state by remember { mutableStateOf(PlayState.OPENING) }
+                Spacer(Modifier.height(10.dp))
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(16f / 9f)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color.Black),
+                    contentAlignment = Alignment.Center
+                ) {
+                    key(software) {
                         VlcPlayer(
                             uri = "udp://@:${StreamProbe.PORT}",
-                            options = listOf(":network-caching=300", ":clock-jitter=0", ":clock-synchro=0", ":no-audio", ":demux=ts"),
+                            options = listOf(":network-caching=300", ":clock-jitter=0", ":clock-synchro=0", ":no-audio", ":demux=ts") +
+                                (if (software) listOf(":codec=avcodec") else emptyList()),
                             modifier = Modifier.fillMaxSize(),
                             onState = { st ->
-                                state = st
+                                if (st != state) vm.plog("player: $st${if (software) " (software)" else ""}")
+                                if (!(state == PlayState.VIDEO && st == PlayState.PLAYING)) state = st
                                 if (st == PlayState.ERROR) vm.previewPlayerFailed()
                             },
                         )
-                        if (state == PlayState.OPENING) Text("Connecting to video…", color = TextDim)
                     }
-                    Text(
-                        "Camera is sending video (${preview.kbReceived} KB in 3 s test). Expect ~1 s delay.",
-                        color = TextDim, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp)
-                    )
+                    if (state == PlayState.OPENING || state == PlayState.PLAYING) {
+                        Text(if (state == PlayState.OPENING) "Connecting to video…" else "Waiting for first frame…", color = TextDim)
+                    }
                 }
-                is Preview.Failed -> Text(preview.reason, color = Warn, fontSize = 13.sp, modifier = Modifier.padding(top = 8.dp))
-                else -> {}
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 6.dp)) {
+                    Text("Expect ~1 s delay, low resolution.", color = TextDim, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                    Chip("Software decode", software, true) { software = !software }
+                }
             }
+            is Preview.Failed -> Text(preview.reason, color = Warn, fontSize = 13.sp, modifier = Modifier.padding(top = 8.dp))
+            else -> {}
+        }
+        if (log.isNotEmpty() && preview != Preview.Off) {
+            Spacer(Modifier.height(8.dp))
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Bg)
+                    .padding(10.dp)
+            ) {
+                log.takeLast(14).forEach {
+                    Text(it, color = TextDim, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+                }
+            }
+            TextButton(onClick = { clipboard.setText(AnnotatedString(log.joinToString("\n"))) }) { Text("Copy log") }
         }
     }
 }
