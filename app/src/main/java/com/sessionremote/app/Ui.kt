@@ -514,7 +514,8 @@ fun ShutterArea(ui: UiState, vm: MainViewModel, connected: Boolean) {
                 "● REC  ${fmtDuration(s?.recordSeconds ?: 0)}",
                 color = Rec, fontSize = 22.sp, fontWeight = FontWeight.Bold,
                 modifier = Modifier.padding(top = 4.dp)
-            )            OutlinedButton(onClick = { vm.tagMoment() }, enabled = enabled, modifier = Modifier.padding(top = 6.dp)) {
+            )
+            OutlinedButton(onClick = { vm.tagMoment() }, enabled = enabled, modifier = Modifier.padding(top = 6.dp)) {
                 Text("★ Tag HiLight")
             }
         }
