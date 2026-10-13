@@ -285,6 +285,21 @@ fun ControlTab(ui: UiState, preview: Preview, vm: MainViewModel) {
                 Button(onClick = { vm.wake() }, modifier = Modifier.weight(1f)) { Text("Wake") }
             }
             Spacer(Modifier.height(8.dp))
+            if (ui.stealth) {
+                Button(
+                    onClick = { vm.setStealth(false) },
+                    enabled = connected && !ui.working,
+                    colors = ButtonDefaults.buttonColors(containerColor = Surface2),
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("🌙 Stealth ON — tap to restore", color = TextMain) }
+            } else {
+                OutlinedButton(
+                    onClick = { vm.setStealth(true) },
+                    enabled = connected && !ui.working,
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("🌙 Stealth: screen, LED & beeps off") }
+            }
+            Spacer(Modifier.height(8.dp))
             if (ui.locating) {
                 Button(
                     onClick = { vm.setLocate(false) },

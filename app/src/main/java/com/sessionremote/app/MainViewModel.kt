@@ -45,6 +45,7 @@ data class UiState(
     val firmware: String? = null,
     val savedMac: String? = null,
     val locating: Boolean = false,
+    val stealth: Boolean = false,
 )
 
 data class MediaUi(
@@ -59,7 +60,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val api = GoProApi()
     private val prefs = app.getSharedPreferences("session_remote", Context.MODE_PRIVATE)
 
-    private val _ui = MutableStateFlow(UiState(savedMac = prefs.getString("mac", null)))
+    private val _ui = MutableStateFlow(UiState(savedMac = prefs.getString("mac", null), stealth = prefs.getBoolean("stealth", false)))
     val ui: StateFlow<UiState> = _ui.asStateFlow()
 
     private val _media = MutableStateFlow(MediaUi())
@@ -221,6 +222,35 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val now = runCatching { api.status().settings }.getOrDefault(emptyMap())
         if (now[3] != fps) api.setSetting(3, fps)
         if (now[4] != fov) runCatching { api.setSetting(4, fov) }
+    }
+
+    /**
+     * Stealth: darken the camera for concerts. Tries every documented HERO4 display/light/sound setting;
+     * the Session may support only some. Previous values are saved and restored on exit.
+     */
+    fun setStealth(on: Boolean) = act("Stealth") {
+        val st = runCatching { api.status().settings }.getOrDefault(emptyMap())
+        val ids = listOf(72, 58, 49, 51, 55, 56)
+        val names = mapOf(72 to "Status screen", 58 to "On-screen info", 49 to "Brightness", 51 to "Screen sleep", 55 to "Red LED", 56 to "Beeps")
+        val targets: List<Pair<Int, Int>>
+        if (on) {
+            val snapshot = ids.filter { st.containsKey(it) }.joinToString(",") { "$it=${st[it]}" }
+            prefs.edit().putString("stealth_restore", snapshot).apply()
+            targets = listOf(72 to 0, 58 to 0, 49 to 2, 51 to 1, 55 to 0, 56 to 2)
+        } else {
+            val saved = prefs.getString("stealth_restore", "").orEmpty()
+                .split(",").mapNotNull { kv -> kv.split("=").takeIf { it.size == 2 }?.let { it[0].toIntOrNull()?.to(it[1].toIntOrNull()) } }
+                .mapNotNull { (k, v) -> if (k != null && v != null) k to v else null }
+            targets = saved.ifEmpty { listOf(72 to 1, 58 to 1, 49 to 0, 51 to 0, 55 to 2, 56 to 0) }
+        }
+        val report = targets.map { (id, v) ->
+            val ok = runCatching { api.setSetting(id, v) }.isSuccess ||
+                (id == 55 && v != 0 && runCatching { api.setSetting(55, 1) }.isSuccess)
+            "${names[id]}: ${if (ok) "✓" else "not supported"}"
+        }
+        prefs.edit().putBoolean("stealth", on).apply()
+        _ui.update { it.copy(stealth = on) }
+        say((if (on) "Stealth on. " else "Stealth off, settings restored. ") + report.joinToString(" · "))
     }
 
     fun setLocate(on: Boolean) = act("Locate") {
