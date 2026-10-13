@@ -1,0 +1,45 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - name: Compile debug APK
+        run: gradle :app:assembleDebug --stacktrace --no-daemon
+
+      - name: Rename APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk SessionRemote.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SessionRemote-apk
+          path: SessionRemote.apk
+
+      - name: Publish as release "latest-build" (direct phone download link)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest-build -y --cleanup-tag || true
+          gh release create latest-build SessionRemote.apk \
+            --title "Session Remote (latest build)" \
+            --notes "Debug APK built from ${GITHUB_SHA::7} on $(date -u +'%Y-%m-%d %H:%M UTC')." \
+            --latest
