@@ -10,7 +10,6 @@ import android.os.Environment
 import android.provider.MediaStore
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import androidx.media3.exoplayer.ExoPlayer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -28,6 +27,13 @@ import java.net.NoRouteToHostException
 import java.net.SocketTimeoutException
 
 enum class Conn { NO_WIFI, SEARCHING, CONNECTED, NOT_RESPONDING }
+
+sealed class Preview {
+    data object Off : Preview()
+    data object Starting : Preview()
+    data class Live(val kbReceived: Long) : Preview()
+    data class Failed(val reason: String) : Preview()
+}
 
 data class UiState(
     val conn: Conn = Conn.NO_WIFI,
@@ -58,8 +64,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val _media = MutableStateFlow(MediaUi())
     val media: StateFlow<MediaUi> = _media.asStateFlow()
 
-    private val _player = MutableStateFlow<ExoPlayer?>(null)
-    val player: StateFlow<ExoPlayer?> = _player.asStateFlow()
+    private val _preview = MutableStateFlow<Preview>(Preview.Off)
+    val preview: StateFlow<Preview> = _preview.asStateFlow()
 
     @Volatile private var network: Network? = null
     private val binder = WifiBinder(app) { net ->
@@ -67,7 +73,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         api.useNetwork(net)
         _ui.update { it.copy(conn = if (net == null) Conn.NO_WIFI else Conn.SEARCHING) }
     }
-    private val preview = LivePreview(app, api)
+    private val keepAlive = KeepAlive()
+    private var paired = false
     private var pollJob: Job? = null
     private val thumbs = HashMap<String, Bitmap?>()
 
@@ -80,6 +87,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             var failures = 0
             while (isActive) {
                 if (network == null) {
+                    paired = false
+                    keepAlive.stop()
                     _ui.update { it.copy(conn = Conn.NO_WIFI, status = null, detail = null) }
                     delay(1000)
                     continue
@@ -88,11 +97,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     val s = api.status()
                     failures = 0
                     _ui.update { it.copy(conn = Conn.CONNECTED, status = s, detail = null) }
+                    if (!paired) {
+                        paired = true
+                        // Ends the camera's "searching" countdown; harmless if this firmware ignores it.
+                        runCatching { api.pairComplete() }
+                        keepAlive.start(viewModelScope)
+                    }
                     if (_ui.value.modelName == null) loadInfo()
                     delay(1000)
                 } catch (e: Exception) {
                     failures++
                     if (failures >= 2) {
+                        paired = false
+                        keepAlive.stop()
                         _ui.update { it.copy(conn = Conn.NOT_RESPONDING, status = null, detail = describe(e)) }
                     } else {
                         _ui.update { it.copy(conn = Conn.SEARCHING) }
@@ -107,10 +124,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         pollJob?.cancel()
         pollJob = null
         stopPreview()
+        keepAlive.stop()
+        paired = false
     }
 
     override fun onCleared() {
-        preview.stop(viewModelScope)
+        keepAlive.stop()
         binder.stop()
     }
 
@@ -204,16 +223,49 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---- Live preview ----
 
-    fun startPreview() = act("Live preview") {
-        val p = preview.start(viewModelScope) { err -> say(err); stopPreview() }
-        _player.value = p
+    fun startPreview() {
+        if (_preview.value is Preview.Starting) return
+        viewModelScope.launch {
+            _preview.value = Preview.Starting
+            try {
+                api.startStream()
+                keepAlive.start(viewModelScope)
+                val bytes = StreamProbe.bytesReceived(3000)
+                _preview.value = if (bytes == 0L) {
+                    Preview.Failed("The camera accepted the start command but sent no video in 3 s. Try again, or switch modes once and retry.")
+                } else {
+                    Preview.Live(bytes / 1024)
+                }
+            } catch (e: Exception) {
+                _preview.value = Preview.Failed("Couldn't start preview: ${describe(e)}")
+            }
+        }
+    }
+
+    fun previewPlayerFailed() {
+        if (_preview.value is Preview.Live) {
+            _preview.value = Preview.Failed("Video is arriving, but the player couldn't decode it.")
+        }
     }
 
     fun stopPreview() {
-        if (_player.value == null) return
-        _player.value = null
-        preview.stop(viewModelScope)
+        if (_preview.value == Preview.Off) return
+        _preview.value = Preview.Off
+        viewModelScope.launch { api.stopStream() }
     }
+
+    // ---- Media viewer ----
+
+    fun fileUrl(f: CamFile) = api.fileUrl(f)
+
+    /** Low-res proxy (.LRV) if the camera made one — plays smoothly over the camera's slow Wi-Fi. */
+    suspend fun playableUrl(f: CamFile, fullQuality: Boolean): String {
+        if (fullQuality) return api.fileUrl(f)
+        val lrv = api.lowResUrl(f)
+        return if (api.exists(lrv)) lrv else api.fileUrl(f)
+    }
+
+    suspend fun fullImage(f: CamFile): Bitmap? = runCatching { api.fullImage(f) }.getOrNull()
 
     // ---- Media ----
 

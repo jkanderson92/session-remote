@@ -1,43 +1,29 @@
 package com.sessionremote.app
 
-import android.content.Context
-import androidx.annotation.OptIn
-import androidx.media3.common.MediaItem
-import androidx.media3.common.PlaybackException
-import androidx.media3.common.Player
-import androidx.media3.common.util.UnstableApi
-import androidx.media3.datasource.DataSource
-import androidx.media3.datasource.UdpDataSource
-import androidx.media3.exoplayer.DefaultLoadControl
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.source.ProgressiveMediaSource
-import androidx.media3.extractor.DefaultExtractorsFactory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.SocketTimeoutException
 
 /**
- * Experimental HERO4 live preview.
- * 1) GET gpStream restart  2) camera sends MPEG-TS over UDP to our port 8554
- * 3) we must send a keep-alive string to camera:8554 every ~2.5 s or it stops.
+ * The HERO4 keep-alive the official app sends to camera:8554 every ~2.5 s.
+ * Keeps the live stream flowing and tells the camera a remote is still there.
  */
-@OptIn(UnstableApi::class)
-class LivePreview(private val context: Context, private val api: GoProApi) {
-    var player: ExoPlayer? = null
-        private set
-    private var keepAlive: Job? = null
+class KeepAlive {
+    private var job: Job? = null
+    val running get() = job?.isActive == true
 
-    suspend fun start(scope: CoroutineScope, onError: (String) -> Unit): ExoPlayer {
-        stop(scope)
-        api.startStream()
-
-        keepAlive = scope.launch(Dispatchers.IO) {
+    fun start(scope: CoroutineScope) {
+        if (running) return
+        job = scope.launch(Dispatchers.IO) {
             val msg = "_GPHD_:0:0:2:0.000000\n".toByteArray()
             val addr = InetAddress.getByName(GoProApi.HOST)
             DatagramSocket().use { s ->
@@ -47,32 +33,42 @@ class LivePreview(private val context: Context, private val api: GoProApi) {
                 }
             }
         }
-
-        val loadControl = DefaultLoadControl.Builder()
-            .setBufferDurationsMs(500, 2000, 250, 250)
-            .build()
-        val p = ExoPlayer.Builder(context).setLoadControl(loadControl).build()
-        val dsFactory = DataSource.Factory { UdpDataSource(UdpDataSource.DEFAULT_MAX_PACKET_SIZE, 10_000) }
-        val source = ProgressiveMediaSource.Factory(dsFactory, DefaultExtractorsFactory())
-            .createMediaSource(MediaItem.fromUri("udp://0.0.0.0:8554"))
-        p.addListener(object : Player.Listener {
-            override fun onPlayerError(error: PlaybackException) {
-                onError("Preview stopped: ${error.errorCodeName}. The HERO4 Session stream is finicky — try Start preview again.")
-            }
-        })
-        p.setMediaSource(source)
-        p.playWhenReady = true
-        p.prepare()
-        player = p
-        return p
     }
 
-    fun stop(scope: CoroutineScope) {
-        keepAlive?.cancel()
-        keepAlive = null
-        val hadPlayer = player != null
-        player?.release()
-        player = null
-        if (hadPlayer) scope.launch { api.stopStream() }
+    fun stop() {
+        job?.cancel()
+        job = null
+    }
+}
+
+object StreamProbe {
+    const val PORT = 8554
+
+    /**
+     * Listens on the preview port for [millis] and returns bytes received.
+     * 0 = the camera isn't sending video at all (vs. the player failing to decode it).
+     * The socket is closed before returning so the player can bind the same port.
+     */
+    suspend fun bytesReceived(millis: Long = 3000): Long = withContext(Dispatchers.IO) {
+        var total = 0L
+        val sock = DatagramSocket(null)
+        try {
+            sock.reuseAddress = true
+            sock.bind(InetSocketAddress(PORT))
+            sock.soTimeout = 300
+            val buf = ByteArray(65536)
+            val end = System.currentTimeMillis() + millis
+            while (System.currentTimeMillis() < end) {
+                try {
+                    val p = DatagramPacket(buf, buf.size)
+                    sock.receive(p)
+                    total += p.length
+                } catch (_: SocketTimeoutException) {
+                }
+            }
+        } finally {
+            sock.close()
+        }
+        total
     }
 }

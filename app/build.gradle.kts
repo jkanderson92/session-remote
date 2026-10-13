@@ -12,8 +12,10 @@ android {
         applicationId = "com.sessionremote.app"
         minSdk = 29
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
+        // arm64 = your S24; x86_64 = the cloud emulator test. Keeps the APK small.
+        ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
 
     // Fixed debug key committed to the repo so every CI build installs over the previous one.
@@ -34,6 +36,7 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true }
+    packaging { jniLibs { useLegacyPackaging = true } }
 }
 
 dependencies {
@@ -46,8 +49,6 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    implementation("androidx.media3:media3-exoplayer:1.5.1")
-    implementation("androidx.media3:media3-datasource:1.5.1")
-    implementation("androidx.media3:media3-extractor:1.5.1")
-    implementation("androidx.media3:media3-ui:1.5.1")
+    // VLC engine: plays the HERO4's quirky UDP MPEG-TS preview and camera files over HTTP
+    implementation("org.videolan.android:libvlc-all:3.7.6")
 }

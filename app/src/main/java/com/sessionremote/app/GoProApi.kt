@@ -73,6 +73,34 @@ class GoProApi {
 
     suspend fun setSetting(id: Int, value: Int) { get("/gp/gpControl/setting/$id/$value") }
 
+    /** Tells the camera a remote app finished connecting, so it stops its "searching"/pairing countdown. */
+    suspend fun pairComplete() {
+        get("/gp/gpControl/command/wireless/pair/complete?success=1&deviceName=SessionRemote")
+    }
+
+    fun fileUrl(f: CamFile) = "$MEDIA_BASE/${f.dir}/${f.name}"
+
+    fun lowResUrl(f: CamFile) = "$MEDIA_BASE/${f.dir}/${f.name.substringBeforeLast('.')}.LRV"
+
+    suspend fun exists(url: String): Boolean = withContext(Dispatchers.IO) {
+        runCatching {
+            client.newCall(Request.Builder().url(url).head().build()).execute().use { it.isSuccessful }
+        }.getOrDefault(false)
+    }
+
+    /** Full photo, downsampled to roughly [maxDim] px on the long side. */
+    suspend fun fullImage(f: CamFile, maxDim: Int = 2400): Bitmap? = withContext(Dispatchers.IO) {
+        val bytes = bulkClient.newCall(Request.Builder().url(fileUrl(f)).build()).execute().use { r ->
+            if (!r.isSuccessful) throw CameraHttpException(r.code, f.name)
+            r.body?.bytes() ?: throw IOException("Empty response")
+        }
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        var sample = 1
+        while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= maxDim) sample *= 2
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample })
+    }
+
     suspend fun startStream() {
         // Firmware differs on which form it accepts; try the documented v2 form, then the older one.
         try {

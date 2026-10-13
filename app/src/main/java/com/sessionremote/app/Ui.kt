@@ -60,8 +60,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.ui.PlayerView
+import androidx.activity.compose.BackHandler
 import java.text.DateFormat
 import java.util.Date
 import java.util.Locale
@@ -80,8 +79,9 @@ val Warn = Color(0xFFFFB020)
 fun App(vm: MainViewModel) {
     val ui by vm.ui.collectAsState()
     val media by vm.media.collectAsState()
-    val player by vm.player.collectAsState()
+    val preview by vm.preview.collectAsState()
     var tab by rememberSaveable { mutableIntStateOf(0) }
+    var viewing by remember { mutableStateOf<CamFile?>(null) }
 
     val view = LocalView.current
     DisposableEffect(ui.conn) {
@@ -105,11 +105,16 @@ fun App(vm: MainViewModel) {
         }
         Box(Modifier.fillMaxSize()) {
             when (tab) {
-                0 -> ControlTab(ui, player, vm)
+                0 -> ControlTab(ui, preview, vm)
                 1 -> SettingsTab(ui, vm)
-                else -> MediaTab(ui, media, vm)
+                else -> MediaTab(ui, media, vm) { viewing = it }
             }
         }
+    }
+
+    viewing?.let { f ->
+        BackHandler { viewing = null }
+        MediaViewer(f, vm) { viewing = null }
     }
 }
 
@@ -180,7 +185,7 @@ fun MessageBar(text: String, onDismiss: () -> Unit) {
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun ControlTab(ui: UiState, player: ExoPlayer?, vm: MainViewModel) {
+fun ControlTab(ui: UiState, preview: Preview, vm: MainViewModel) {
     val s = ui.status
     val connected = ui.conn == Conn.CONNECTED && s != null
     Column(
@@ -224,29 +229,44 @@ fun ControlTab(ui: UiState, player: ExoPlayer?, vm: MainViewModel) {
         // Live preview
         Card {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Label("Live preview (experimental)", Modifier.weight(1f))
-                if (player == null) {
-                    Button(onClick = { vm.startPreview() }, enabled = connected && !ui.working) { Text("Start") }
-                } else {
-                    OutlinedButton(onClick = { vm.stopPreview() }) { Text("Stop") }
+                Label("Live preview", Modifier.weight(1f))
+                when (preview) {
+                    Preview.Off, is Preview.Failed ->
+                        Button(onClick = { vm.startPreview() }, enabled = connected) { Text("Start") }
+                    Preview.Starting -> Text("Starting…", color = TextDim)
+                    is Preview.Live -> OutlinedButton(onClick = { vm.stopPreview() }) { Text("Stop") }
                 }
             }
-            if (player != null) {
-                val exo: ExoPlayer = player
-                Spacer(Modifier.height(10.dp))
-                AndroidView(
-                    factory = { c -> PlayerView(c).also { pv -> pv.useController = false; pv.player = exo } },
-                    update = { pv -> pv.player = exo },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(16f / 9f)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(Color.Black)
-                )
-                Text(
-                    "Low-res, delayed feed over UDP. If it stays black after ~10 s, stop and start again.",
-                    color = TextDim, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp)
-                )
+            when (preview) {
+                is Preview.Live -> {
+                    var state by remember { mutableStateOf(PlayState.OPENING) }
+                    Spacer(Modifier.height(10.dp))
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .aspectRatio(16f / 9f)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color.Black),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        VlcPlayer(
+                            uri = "udp://@:${StreamProbe.PORT}",
+                            options = listOf(":network-caching=300", ":clock-jitter=0", ":clock-synchro=0", ":no-audio", ":demux=ts"),
+                            modifier = Modifier.fillMaxSize(),
+                            onState = { st ->
+                                state = st
+                                if (st == PlayState.ERROR) vm.previewPlayerFailed()
+                            },
+                        )
+                        if (state == PlayState.OPENING) Text("Connecting to video…", color = TextDim)
+                    }
+                    Text(
+                        "Camera is sending video (${preview.kbReceived} KB in 3 s test). Expect ~1 s delay.",
+                        color = TextDim, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp)
+                    )
+                }
+                is Preview.Failed -> Text(preview.reason, color = Warn, fontSize = 13.sp, modifier = Modifier.padding(top = 8.dp))
+                else -> {}
             }
         }
     }
@@ -381,6 +401,10 @@ private val VIDEO_SETTINGS = listOf(
     SettingDef(4, "Field of view", listOf(Opt("Wide", 0), Opt("Medium", 1), Opt("Narrow", 2))),
 )
 
+private val AUTO_OFF = SettingDef(59, "Auto off", listOf(
+    Opt("Never", 0), Opt("1 min", 1), Opt("2 min", 2), Opt("3 min", 3), Opt("5 min", 4),
+))
+
 // Session-specific Protune values (firmware 2.00+, video mode only) per goprowifihack HERO4-Session doc.
 private val PROTUNE_SETTINGS = listOf(
     SettingDef(10, "Protune", listOf(Opt("Off", 0), Opt("On", 1))),
@@ -418,6 +442,10 @@ fun SettingsTab(ui: UiState, vm: MainViewModel) {
         SectionTitle("Video")
         VIDEO_SETTINGS.forEach { SettingRow(it, s, enabled, vm) }
 
+        SectionTitle("Camera")
+        SettingRow(AUTO_OFF, s, connected && !ui.working, vm)
+        Text("Auto off controls the camera's sleep timer. If an option is rejected, your firmware doesn't support it.", color = TextDim, fontSize = 13.sp)
+
         SectionTitle("Protune")
         val inVideo = s?.mode == 0
         if (connected && !inVideo) {
@@ -453,7 +481,7 @@ fun SettingRow(def: SettingDef, s: CameraStatus?, enabled: Boolean, vm: MainView
 // ---------- Media ----------
 
 @Composable
-fun MediaTab(ui: UiState, media: MediaUi, vm: MainViewModel) {
+fun MediaTab(ui: UiState, media: MediaUi, vm: MainViewModel, onOpen: (CamFile) -> Unit) {
     val connected = ui.conn == Conn.CONNECTED
     LaunchedEffect(connected) {
         if (connected && media.files.isEmpty() && media.error == null) vm.loadMedia()
@@ -475,7 +503,7 @@ fun MediaTab(ui: UiState, media: MediaUi, vm: MainViewModel) {
         }
         LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             items(media.files, key = { it.key }) { f ->
-                MediaRow(f, media.progress[f.key], f.key in media.done, connected, vm)
+                MediaRow(f, media.progress[f.key], f.key in media.done, connected, vm) { onOpen(f) }
             }
             item { Spacer(Modifier.height(24.dp)) }
         }
@@ -483,7 +511,7 @@ fun MediaTab(ui: UiState, media: MediaUi, vm: MainViewModel) {
 }
 
 @Composable
-fun MediaRow(f: CamFile, progress: Float?, done: Boolean, connected: Boolean, vm: MainViewModel) {
+fun MediaRow(f: CamFile, progress: Float?, done: Boolean, connected: Boolean, vm: MainViewModel, onOpen: () -> Unit) {
     var thumb by remember(f.key) { mutableStateOf<Bitmap?>(null) }
     LaunchedEffect(f.key, connected) { if (connected && thumb == null) thumb = vm.thumbnail(f) }
     Row(
@@ -491,6 +519,7 @@ fun MediaRow(f: CamFile, progress: Float?, done: Boolean, connected: Boolean, vm
             .fillMaxWidth()
             .clip(RoundedCornerShape(14.dp))
             .background(Surface1)
+            .clickable(enabled = connected, onClick = onOpen)
             .padding(10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
